@@ -6,18 +6,18 @@ manualy, there is no Norton gearbox. So every time when I want to change the
 feed rate or the thread pitch I have to disasseble the current gears
 and mount the new ones. Maybe only for a short movement. Thats a lot of work!
 
-Now I have replaced these gears by this electronic feed and thread controller.
+Now I have replaced these gears by this electronic feed and thread controller.</br>
 It consists of:
 - An Arduino Nano with an 0.9" GLCD and a manual rotary encoder for human interface.
 - An quadrature encoder with high resolution to track the position of the main spindle.
 - An stepper motor and the driver attached to the original feed / thread gearbox.
 
-The handling is now much easier!
-I only have to select the needed feed or thread pitch value on the controller.
+The handling is now much easier!</br>
+I only have to select the needed feed or thread pitch value on the controller.</br>
 And of course the right settings on the lathe. (Bed slide engagement, leadscrew or towbar, ...)
 
-Written by Dirk Radloff, with contributions from the open source community.
-GNU V3 license, check license.txt for more information. All text above must be
+Written by Dirk Radloff, with contributions from the open source community.</br>
+GPL V3 license, check license.txt for more information. All text above must be
 included in any redistribution.
 
 Hosted on Github:
