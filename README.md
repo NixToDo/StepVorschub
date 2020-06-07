@@ -31,4 +31,11 @@ This software uses following libraries:
   https://github.com/MajicDesigns/MD_REncoder
 - For debouncing the manual encoder push button:</br>
   https://github.com/thomasfredericks/Bounce2
-  
+
+Outside:</br>
+[Using the StepVorschub]()
+
+Inside:</br>
+[Schematic for this project](schematic/Schematic.png)</br>
+[How does it work?]()</br>
+[How to build it?]()
