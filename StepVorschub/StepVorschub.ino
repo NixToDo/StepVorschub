@@ -17,6 +17,8 @@ It consists of:
 The handling is now much easier!
 I only have to select the needed feed or thread pitch value on the controller.
 And of course the right settings on the lathe. (Bed slide engagement, leadscrew or towbar, ...)
+It also adds a motion limit function. So after setup the motion will stop
+always at the same position.
 
 Written by Dirk Radloff, with contributions from the open source community.
 GNU license, check license.txt for more information. All text above must be
@@ -58,20 +60,33 @@ This software uses following libraries:
 #define SENC_PULSES_PER_TURN 25000 // Spindle encoder counts per turn
 #define STEPS_MM_TOWBAR ((200 * 8 * 2 * 2) / 1.36) // Steps needed per 1 mm travel
 #define STEPS_MM_LEADSCREW ((200 * 8 * 2 * 2) / 3.0) // Steps needed per 1 mm/U
-#define RESTFACTOR 32768
+#define RESTFACTOR 32768 // Fixed point arithmetic factor
 
 // Limits
 #define MIN_STEIGUNG 0.0 // mm / U
 #define MAX_STEIGUNG 5.0 // mm / U
+#define MIN_TPI      0  // Turns per inch
+#define MAX_TPI      60 // Turns per inch
+
+// Button states
+#define EB_NORMAL   0
+#define EB_PRESSED  1
+#define EB_DOWN     2
+#define EB_RELEASED 3
+#define EB_LONG     4
+#define EB_DOUBLE   5
+
+#define EB_LONG_TIME   1000
+#define EB_DOUBLE_TIME 500
 
 // Declaration for an SSD1306 display connected to I2C (SDA, SCL pins)
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
 // Set up encoder object
-MD_REncoder R = MD_REncoder(MENC_A_PIN, MENC_B_PIN);
+MD_REncoder Encoder = MD_REncoder(MENC_A_PIN, MENC_B_PIN);
 
 // Instantiate a Bounce object
-Bounce debouncer = Bounce(); 
+Bounce Debouncer = Bounce(); 
 
 // Direction
 typedef enum {
@@ -81,27 +96,25 @@ typedef enum {
 } Direction_t;
 
 // Global variables
-bool Mode = false;
-float Steps_MM = STEPS_MM_TOWBAR;
 float Vorschub = 0.1;
 float Gewinde = 1.0;
-float Steigung = Vorschub;
+uint8_t TPI = 20;
 float CntPos = 1.0;
 volatile uint16_t TargetValue = 0, TargetRest = 0, ReloadRest = 0;
 volatile Direction_t Cur_Direction = Dir_Unknown, Old_Direction = Dir_Unknown;
-volatile bool Stop_Position = false;
+volatile bool UseStartPosition = false;
+volatile bool UseStopPosition = false;
+volatile int32_t StopPosition = 0;
 volatile int32_t Position = 0;
 
 
-void Timer1_Off (void)
-{
+void Timer1_Off (void){
   TCCR1B = 0; // STOP Timer1
   EIMSK &= ~(1<<INT1); // Disable INT1
   PCICR &= ~(1<<PCIE2); // Disable pin change
 }
 
-void Timer1_On (void)
-{
+void Timer1_On (void){
   TCCR1B = (1<<WGM12) | (1<<WGM13); // STOP Timer1, CTC mode 12
   TCCR1A = (1<<COM1A0); // OCR1A toggle mode
   TCNT1  = 0;
@@ -113,38 +126,18 @@ void Timer1_On (void)
   TCCR1B |= (1<<CS12) | (1<<CS11) | (1<<CS10); // Start Timer1 ext. Clk
   Cur_Direction = Dir_Unknown;
   Direction_detection_enable();
-  Stop_Position = false;
+  UseStartPosition = false;
+  UseStopPosition = false;
 }
-/*
-void Timer1_On_Sync (void)
-{
-  TCCR1B = (1<<WGM12) | (1<<WGM13); // STOP Timer1, CTC mode 12
-  TCCR1A = (1<<COM1A0); // OCR1A toggle mode
-  TCNT1  = 0;
-  ICR1   = SENC_PULSES_PER_TURN;
-  OCR1A  = TargetValue;
-  ReloadRest = 0;
-  TIFR1  = (1<<OCF1A); // OCIE cleared
-  TIMSK1 = (1<<OCIE1A); // OCIE enabled
-  EICRA |= (1<<ISC11) | (1<<ISC10); // INT1 Spindle index signal at rising edge
-  EIFR  |= (1<<INTF1); // Clear flag
-  EIMSK |= (1<<INT1); // Enable INT1
-  Cur_Direction = Dir_Unknown;
-  Direction_detection_enable();
-  Stop_Position = false;
-}
-*/
-// Enable pin change interrupt on PD4 & PD5 (SENC_A_PIN & SENC_B_PIN)
-void Direction_detection_enable (void)
-{
-  PCMSK2 |= (1<<PCINT20) | (1<<PCINT21);
+
+void Direction_detection_enable (void){
+  PCMSK2 |= (1<<PCINT20) | (1<<PCINT21); // Enable pin change interrupt on PD4 & PD5 (SENC_A_PIN & SENC_B_PIN)
   PCIFR |= (1<<PCIF2);
   PCICR |= (1<<PCIE2);
 }
 
-// Direction detection
-ISR(PCINT2_vect)
-{
+ISR(PCINT2_vect){
+  // Direction detection
   static uint8_t state = 0x01;
   state = state | (PIND & 0x30);
   
@@ -179,17 +172,9 @@ ISR(PCINT2_vect)
       break;
   }
 }
-/*
-// Start detection by Index signal
-ISR(INT1_vect)
-{
-  TCCR1B |= (1<<CS12) | (1<<CS11) | (1<<CS10); // Start Timer1 ext. Clk
-  EIMSK  &= ~(1<<INT1); // Disable INT1
-}
-*/
-// Step output OCR1A reloader
-ISR(TIMER1_COMPA_vect)
-{
+
+ISR(TIMER1_COMPA_vect){
+  // Step output OCR1A reloader
   if ((Old_Direction != Dir_Unknown) && (Old_Direction != Cur_Direction)){ // Correct counting value because an direction change occur
     int16_t tmp = TCNT1;
     int16_t dup = OCR1A - tmp; // Delta to next step
@@ -217,14 +202,23 @@ ISR(TIMER1_COMPA_vect)
   
   if (OCR1A >= SENC_PULSES_PER_TURN) // Reload bigger or equal than encoder counts?
     OCR1A -= SENC_PULSES_PER_TURN;
-
-  if (Stop_Position == true){
-    if (Cur_Direction == Dir_Right)
-      Position++;
-    else
-      Position--;
-    
+  
+  if (Cur_Direction == Dir_Right) // Count current position
+    Position++;
+  else
+    Position--;
+  
+  if (UseStartPosition == true){ // 1.Limit
     if (Position == 0){
+      if ((TCCR1A & (1<<COM1A0)))
+        TCCR1A &= ~(1<<COM1A0);
+      else
+        TCCR1A |= (1<<COM1A0);
+    }
+  }
+  
+  if (UseStopPosition == true){ // 2.Limit
+    if (Position == StopPosition){
       if ((TCCR1A & (1<<COM1A0)))
         TCCR1A &= ~(1<<COM1A0);
       else
@@ -236,36 +230,377 @@ ISR(TIMER1_COMPA_vect)
   TCCR1C |= (1<<FOC1A); // Force compare match to clear step pin again
 }
 
-uint8_t Standstill (void)
-{
-  if ((PCICR & (1<<PCIE2)) != 0)
+uint8_t Standstill (void){
+  
+  if ((PCICR & (1<<PCIE2)) != 0) // DIR detection active
     return(2);
   
   uint16_t tmp = TCNT1;
   delay(100);
   
-  if (tmp == TCNT1)
+  if (tmp == TCNT1) // Change in Timer 1 value?
     return(1);
   else
-    return(0);
+    return(0); // Spindel is running
 }
 
-void Calc_Steps (void)
-{
-  float pulsStep;
-  
-  pulsStep = (float)SENC_PULSES_PER_TURN / (Steps_MM * Steigung);
+void Calc_Steps (float Steigung, float Steps_MM){
+  float pulsStep = (float)SENC_PULSES_PER_TURN / (Steps_MM * Steigung);
   TargetValue = (uint16_t)pulsStep;
   TargetRest  = (uint16_t)((pulsStep - (float)TargetValue) * RESTFACTOR) + 0.5;
+}
+
+uint8_t Encoder_Button_Readout (int8_t *cnt){
+  static uint32_t lasthightime = 0;
+  
+	switch (Encoder.read())
+	{
+		case DIR_NONE:
+			break;
+		
+		case DIR_CW:
+			(*cnt)++;
+			break;
+		
+		case DIR_CCW:
+			(*cnt)--;
+			break;
+	}
+  
+  Debouncer.update();
+  
+  if (Debouncer.fell() == true){ // Button goes down detected
+    lasthightime = Debouncer.previousDuration();
+		return (EB_PRESSED);
+  }
+  
+	if (Debouncer.rose() == true){ // Button goes up
+    if (lasthightime < EB_DOUBLE_TIME) // Double click?
+      return (EB_DOUBLE);
+    
+    return (EB_RELEASED);
+	}
+  
+	if (Debouncer.read() == LOW){ // Button down
+    if (Debouncer.duration() >= EB_LONG_TIME) // Long press?
+      return (EB_LONG);
+    
+		return (EB_DOWN);
+	}
+  
+	return (EB_NORMAL); // Button untouched
+}
+
+uint8_t Main_Menu (bool draw, int8_t *enccnt, uint8_t bclick, uint8_t rtnmenu){
+  static uint8_t menupos = 0;
+  
+  if (bclick == EB_PRESSED){ // Go to selected menu item
+    *enccnt = 0;
+    return(menupos);
+  }
+  
+	if (*enccnt < 1) // Limit encoder
+		*enccnt = 1;
+	else if (*enccnt > 3)
+		*enccnt = 3;
+	
+	if (draw == true || *enccnt != menupos){ // Draw it only if needed
+    menupos = *enccnt;
+    display.clearDisplay();
+		display.setCursor(0, 0);
+		display.println(F("Main menu:"));
+		display.println(F(" 1 Feed"));
+		display.println(F(" 2 Metric"));
+		display.println(F(" 3 TPI"));
+		display.setCursor(0, (menupos * 16));
+		display.print(F(">"));
+		display.display();
+	}
+	
+  return(0);
+}
+
+uint8_t Feed_Screen (bool draw, int8_t *enccnt, uint8_t bclick, uint8_t rtnmenu){
+  if (bclick == EB_LONG){ // Return to main menu
+    PORTB &= ~(1<<PB3); // Disable stepper
+    return (0);
+  }
+  
+  if (bclick == EB_DOUBLE){ // Go to limit menu
+    return (4);
+  }
+  
+  if (bclick == EB_PRESSED){ // Change rotay resolution
+    if (CntPos > 0.01)
+      CntPos /= 10.0;
+    else
+      CntPos = 1.0;
+    
+    return (1);
+  }
+  
+  if (draw == true) // Set it at menu entry
+    CntPos = 1.0;
+  
+  if (draw == true || *enccnt != 0){ // Draw it only if needed
+		if (rtnmenu != 4){ // Don't change value after return from limit menu
+		  Vorschub += (*enccnt * CntPos);
+      *enccnt = 0;
+      
+      if (Vorschub > MAX_STEIGUNG) // Limit value
+        Vorschub = MAX_STEIGUNG;
+		  else if (Vorschub < MIN_STEIGUNG)
+        Vorschub = MIN_STEIGUNG;
+      
+      if (Vorschub != 0.0)
+        PORTB |= (1<<PB3); // Enable stepper
+      else
+        PORTB &= ~(1<<PB3); // Disable stepper at 0.0 mm/U
+      
+      // Calculate new value
+      Timer1_Off();
+      Calc_Steps(Vorschub, STEPS_MM_TOWBAR);
+      Timer1_On();
+    }
+    
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println(F("Feed:"));
+    display.print(Vorschub, 2);
+    display.println(F(" mm/U"));
+
+    if (UseStartPosition == true)
+      display.print(F("Limit 1"));
+    if (UseStopPosition == true)
+      display.print(F("&2"));
+    
+    display.display();
+  }
+  
+  return (1);
+}
+
+uint8_t Thread_MM_Screen (bool draw, int8_t *enccnt, uint8_t bclick, uint8_t rtnmenu){
+  if (bclick == EB_LONG){ // Return to main menu
+    PORTB &= ~(1<<PB3); // Disable stepper
+    return (0);
+  }
+  
+  if (bclick == EB_DOUBLE){ // Go to limit menu
+    return (4);
+  }
+  
+  if (bclick == EB_PRESSED){ // Change rotay resolution
+    if (CntPos > 0.01)
+      CntPos /= 10.0;
+    else
+      CntPos = 1.0;
+    
+    return (2);
+  }
+  
+  if (draw == true) // Set it at menu entry
+    CntPos = 1.0;
+  
+  if (draw == true || *enccnt != 0){ // Draw it only if needed
+    if (rtnmenu != 4){ // Don't change value after return from limit menu
+      Gewinde += (*enccnt * CntPos);
+      *enccnt = 0;
+      
+      if (Gewinde > MAX_STEIGUNG) // Limit value
+        Gewinde = MAX_STEIGUNG;
+      else if (Gewinde < MIN_STEIGUNG)
+        Gewinde = MIN_STEIGUNG;
+      
+      if (Gewinde != 0.0)
+        PORTB |= (1<<PB3); // Enable stepper
+      else
+        PORTB &= ~(1<<PB3); // Disable stepper at 0.0 mm/U
+      
+      // Calculate new value
+      Timer1_Off();
+      Calc_Steps(Gewinde, STEPS_MM_LEADSCREW);
+      Timer1_On();
+    }
+    
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println(F("Thread:"));
+    display.print(Gewinde, 2);
+    display.println(F(" mm/U"));
+    
+    if (UseStartPosition == true)
+      display.print(F("Limit 1"));
+    if (UseStopPosition == true)
+      display.print(F("&2"));
+    
+    display.display();
+  }
+  
+  return (2);
+}
+
+uint8_t Thread_TPI_Screen (bool draw, int8_t *enccnt, uint8_t bclick, uint8_t rtnmenu){
+  if (bclick == EB_LONG){ // Return to main menu
+    PORTB &= ~(1<<PB3); // Disable stepper
+    return (0);
+  }
+  
+  if (bclick == EB_DOUBLE){ // Go to limit menu
+    return (4);
+  }
+  
+  if (bclick == EB_PRESSED){ // Change rotay resolution
+    if (CntPos > 1.0)
+      CntPos /= 10.0;
+    else
+      CntPos = 10.0;
+    
+    return (3);
+  }
+  
+  if (draw == true) // Set it at menu entry
+    CntPos = 10.0;
+  
+  if (draw == true || *enccnt != 0){ // Draw it only if needed
+    if (rtnmenu != 4){ // Don't change value after return from limit menu
+      TPI += (*enccnt * (int8_t)CntPos);
+      *enccnt = 0;
+      
+      if (TPI > MAX_TPI) // Limit value
+        TPI = MAX_TPI;
+      else if (TPI < MIN_TPI)
+        TPI = MIN_TPI;
+      
+      if (TPI != 0.0)
+        PORTB |= (1<<PB3); // Enable stepper
+      else
+        PORTB &= ~(1<<PB3); // Disable stepper at 0.0 mm/U
+      
+      // Calculate new value
+      Timer1_Off();
+      Calc_Steps((TPI / 25.4), STEPS_MM_LEADSCREW);
+      Timer1_On();
+    }
+    
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println(F("Thread:"));
+    display.print(TPI);
+    display.println(F(" TPI"));
+    
+    if (UseStartPosition == true)
+      display.print(F("Limit 1"));
+    if (UseStopPosition == true)
+      display.print(F("&2"));
+    
+    display.display();
+  }
+  
+  return (3);
+}
+
+uint8_t Sub_Menu (bool draw, int8_t *enccnt, uint8_t bclick, uint8_t rtnmenu){
+  static uint8_t menupos = 0, rtnm = 0;
+  
+  if (bclick == EB_PRESSED){ // Menu item selected
+    if (Standstill() > 0){ // Only if spindle does not rotate
+      switch (menupos){
+        case 1: // 1. Limit
+          UseStartPosition = true;
+          UseStopPosition = false;
+          Position = 0;
+          break;
+          
+        case 2: // 2. Limit
+          if (UseStartPosition == true){
+            UseStopPosition = true;
+            StopPosition = Position;
+          }
+          break;
+          
+        default: // Return
+          break;
+      }
+    }
+    
+    *enccnt = 0;
+    return(rtnm);
+  }
+  
+  if (*enccnt < 1) // Limit encoder
+    *enccnt = 1;
+  else if (*enccnt > 3)
+    *enccnt = 3;
+  
+  if (draw == true){ // Draw display anyway
+    rtnm = rtnmenu;
+    
+    if (UseStartPosition == true && UseStopPosition == false) // Second call: directly to second limit
+      *enccnt = 2;
+    else if (UseStartPosition == true && UseStopPosition == true) // Thrid call: directly to return
+      *enccnt = 3;
+  }
+  
+  if (draw == true || *enccnt != menupos){ // Draw it only if needed
+    menupos = *enccnt;
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println(F("Set:"));
+    display.println(F(" 1. Limit"));
+    display.println(F(" 2. Limit"));
+    display.println(F(" Return"));
+    display.setCursor(0, (menupos * 16));
+    display.print(F(">"));
+    display.display();
+  }
+  
+  return (4);
+}
+
+void Menu_Selector (void){
+  static uint8_t curmenu = 0, oldmenu = 0xFF, lastmenu = 0;
+	static int8_t enccnt = 0;
+	uint8_t bt = Encoder_Button_Readout(&enccnt);
+  bool menuchanged;
+  
+	if (curmenu != oldmenu){ // Record of last selected menus
+    menuchanged = true;
+    lastmenu = oldmenu;
+    oldmenu = curmenu;
+  }
+  else
+    menuchanged = false;
+  
+  switch (curmenu){
+    case 0:
+    default:
+      curmenu = Main_Menu(menuchanged, &enccnt, bt, lastmenu);
+      break;
+    
+    case 1:
+      curmenu = Feed_Screen(menuchanged, &enccnt, bt, lastmenu);
+      break;
+    
+    case 2:
+      curmenu = Thread_MM_Screen(menuchanged, &enccnt, bt, lastmenu);
+      break;
+    
+    case 3:
+      curmenu = Thread_TPI_Screen(menuchanged, &enccnt, bt, lastmenu);
+      break;
+    
+    case 4:
+      curmenu = Sub_Menu(menuchanged, &enccnt, bt, lastmenu);
+      break;
+  }
 }
 
 void setup() {
   Serial.begin(57600);
   Serial.print(F("Init "));
-  R.begin();
-
+  
   // Setup pins
-  pinMode(BUTTON_PIN, INPUT_PULLUP);
   pinMode(SENC_A_PIN, INPUT);
   pinMode(SENC_B_PIN, INPUT);
   pinMode(SENC_Z_PIN, INPUT);
@@ -273,9 +608,15 @@ void setup() {
   pinMode(DIR_PIN, OUTPUT);
   pinMode(EN_PIN, OUTPUT);
   
+  // Disable stepper
+  PORTB &= ~(1<<PB3);
+  
+  // Encoder
+  Encoder.begin();
+  
   // After setting up the button, setup the Bounce instance :
-  debouncer.attach(BUTTON_PIN);
-  debouncer.interval(5); // interval in ms
+  Debouncer.attach(BUTTON_PIN, INPUT_PULLUP);
+  Debouncer.interval(10); // interval in ms
   
   // SSD1306_SWITCHCAPVCC = generate display voltage from 3.3V internally
   if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { // Address 0x3C for 128x64
@@ -290,99 +631,13 @@ void setup() {
   display.setCursor(0, 0); // Start at top-left corner
   display.cp437(true); // Use full 256 char 'Code Page 437' font
   
-  display.println(F("Vorschub:"));
-  display.print(Steigung, 2);
-  display.println(F(" mm/U"));
-  display.display();
-
-  Timer1_Off();
-  Calc_Steps();
-  PORTB |= (1<<PB3); // Enable stepper
-  Timer1_On();
-  
   Serial.println(F("done"));
 }
 
 void loop() {
-  debouncer.update();
-  uint8_t x = R.read();
-  bool btpress = debouncer.fell();
-  bool btlow = debouncer.read();
-    
-  // Check for button press
-  if (btpress == true){
-    if (CntPos > 0.01)
-      CntPos /= 10.0;
-    else
-      CntPos = 1.0;
-  }
+  Menu_Selector();
   
-  // Check for manual encoder turn
-  if (btlow == HIGH){ // Encoder button not pressed
-    if (x == DIR_CW){
-      Steigung += CntPos;
-      
-      if (Steigung > MAX_STEIGUNG)
-        Steigung = MAX_STEIGUNG;
-    }
-    else if (x == DIR_CCW){
-      Steigung -= CntPos;
-      
-      if (Steigung < MIN_STEIGUNG)
-        Steigung = MIN_STEIGUNG;
-    }
-  }
-  else { // Encoder button pressed
-    if (x == DIR_CW){
-      Gewinde = Steigung;
-      Steigung = Vorschub;
-      Steps_MM = STEPS_MM_TOWBAR;
-      Mode = false;
-    }
-    else if (x == DIR_CCW){
-      Vorschub = Steigung;
-      Steigung = Gewinde;
-      Steps_MM = STEPS_MM_LEADSCREW;
-      Mode = true;
-    }
-    else if ((x == DIR_NONE) && (Standstill() > 0)){
-      Stop_Position = true;
-      Position = 0;
-      display.setCursor(40, 32);
-      display.print(F("STOP"));
-      display.setCursor(16, 49);
-      display.print(F("gesetzt!"));
-      display.display();
-    }
-  }
-  
-  if (x != DIR_NONE){
-    Timer1_Off();
-    Calc_Steps();
-    Timer1_On();
-    display.clearDisplay();
-    display.setCursor(0, 0);
-    
-    if (Mode == false){
-      display.println(F("Vorschub:"));
-      //Timer1_On_Now();
-    }
-    else{
-      display.println(F("Gewinde:"));
-      //Timer1_On_Sync();
-    }
-    
-    display.print(Steigung, 2);
-    display.println(F(" mm/U"));
-    display.display();
-    
-    if (Steigung != 0.0)
-      PORTB |= (1<<PB3); // Enable stepper
-    else
-      PORTB &= ~(1<<PB3); // Disable stepper at 0.0 mm/U
-  }
-  
-  if (Standstill() == 1){
-      Direction_detection_enable();
+  if (Standstill() == 1){ // At standstill, start DIR detection again
+    Direction_detection_enable();
   }
 }
