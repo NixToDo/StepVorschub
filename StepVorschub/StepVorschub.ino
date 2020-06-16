@@ -479,7 +479,7 @@ uint8_t Thread_TPI_Screen (bool draw, int8_t *enccnt, uint8_t bclick, uint8_t rt
       
       // Calculate new value
       Timer1_Off();
-      Calc_Steps((TPI / 25.4), STEPS_MM_LEADSCREW);
+      Calc_Steps((25.4 / TPI), STEPS_MM_LEADSCREW);
       Timer1_On();
     }
     
