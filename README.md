@@ -14,7 +14,7 @@ It consists of:
 
 The handling is now much easier!</br>
 I only have to select the needed feed or thread pitch value on the controller.</br>
-And of course the right settings on the lathe. (Bed slide engagement, leadscrew or towbar, ...)
+And of course the right settings on the lathe. (Bed slide engagement, leadscrew or towbar, ...)</br>
 It also adds a motion limit function. So after setup, the motion will stop always at the same position.
 
 Written by Dirk Radloff, with contributions from the open source community.</br>
