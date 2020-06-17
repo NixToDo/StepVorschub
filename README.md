@@ -34,7 +34,7 @@ This software uses following libraries:
   https://github.com/thomasfredericks/Bounce2
 
 Outside:</br>
-[Using the StepVorschub](https://github.com/NixToDo/StepVorschub/wiki/Using-the-StepVorschub)
+[Using StepVorschub](https://github.com/NixToDo/StepVorschub/wiki/Using-StepVorschub)
 
 Inside:</br>
 [Schematic for this project](schematic/Schematic.png)</br>
