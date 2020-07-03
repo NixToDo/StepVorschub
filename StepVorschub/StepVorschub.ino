@@ -635,9 +635,12 @@ void setup() {
 }
 
 void loop() {
-  Menu_Selector();
-  
-  if (Standstill() == 1){ // At standstill, start DIR detection again
-    Direction_detection_enable();
+  uint8_t x = Standstill();
+	
+	if (x > 0){ // Spindle is not running
+		Menu_Selector();
+		
+		if (x == 1) // At standstill, start DIR detection again
+			Direction_detection_enable();
   }
 }
